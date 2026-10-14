@@ -33,21 +33,14 @@ FALLBACK = {
 BGM_PATH = ROOT / "bgm.mp3" if (ROOT / "bgm.mp3").exists() else ROOT / "assets" / "bgm.mp3"
 
 
+
+
+
+
 # =====================================================================
-#  캡처 자동 처리 (한 파일에 모두 포함 — 다른 폴더가 없어도 동작)
+#  캡처 자동 처리 (이 파일 안에 모두 포함 — 다른 폴더가 없어도 동작)
 # =====================================================================
 import csv as _csv
-import re
-from difflib import SequenceMatcher
-
-import cv2
-import numpy as np
-from PIL import Image
-
-try:
-    import pytesseract
-except Exception:
-    pytesseract = None
 
 POKEMON_NAMES = json.loads('{"bulbasaur": {"en": "Bulbasaur", "ko": "이상해씨", "dex": 1}, "ivysaur": {"en": "Ivysaur", "ko": "이상해풀", "dex": 2}, "venusaur": {"en": "Venusaur", "ko": "이상해꽃", "dex": 3}, "charmander": {"en": "Charmander", "ko": "파이리", "dex": 4}, "charmeleon": {"en": "Charmeleon", "ko": "리자드", "dex": 5}, "charizard": {"en": "Charizard", "ko": "리자몽", "dex": 6}, "squirtle": {"en": "Squirtle", "ko": "꼬부기", "dex": 7}, "wartortle": {"en": "Wartortle", "ko": "어니부기", "dex": 8}, "blastoise": {"en": "Blastoise", "ko": "거북왕", "dex": 9}, "caterpie": {"en": "Caterpie", "ko": "캐터피", "dex": 10}, "metapod": {"en": "Metapod", "ko": "단데기", "dex": 11}, "butterfree": {"en": "Butterfree", "ko": "버터플", "dex": 12}, "weedle": {"en": "Weedle", "ko": "뿔충이", "dex": 13}, "kakuna": {"en": "Kakuna", "ko": "딱충이", "dex": 14}, "beedrill": {"en": "Beedrill", "ko": "독침붕", "dex": 15}, "pidgey": {"en": "Pidgey", "ko": "구구", "dex": 16}, "pidgeotto": {"en": "Pidgeotto", "ko": "피죤", "dex": 17}, "pidgeot": {"en": "Pidgeot", "ko": "피죤투", "dex": 18}, "rattata": {"en": "Rattata", "ko": "꼬렛", "dex": 19}, "raticate": {"en": "Raticate", "ko": "레트라", "dex": 20}, "spearow": {"en": "Spearow", "ko": "깨비참", "dex": 21}, "fearow": {"en": "Fearow", "ko": "깨비드릴조", "dex": 22}, "ekans": {"en": "Ekans", "ko": "아보", "dex": 23}, "arbok": {"en": "Arbok", "ko": "아보크", "dex": 24}, "pikachu": {"en": "Pikachu", "ko": "피카츄", "dex": 25}, "raichu": {"en": "Raichu", "ko": "라이츄", "dex": 26}, "sandshrew": {"en": "Sandshrew", "ko": "모래두지", "dex": 27}, "sandslash": {"en": "Sandslash", "ko": "고지", "dex": 28}, "nidoran♀": {"en": "Nidoran♀", "ko": "니드런♀", "dex": 29}, "nidorina": {"en": "Nidorina", "ko": "니드리나", "dex": 30}, "nidoqueen": {"en": "Nidoqueen", "ko": "니드퀸", "dex": 31}, "nidoran♂": {"en": "Nidoran♂", "ko": "니드런♂", "dex": 32}, "nidorino": {"en": "Nidorino", "ko": "니드리노", "dex": 33}, "nidoking": {"en": "Nidoking", "ko": "니드킹", "dex": 34}, "clefairy": {"en": "Clefairy", "ko": "삐삐", "dex": 35}, "clefable": {"en": "Clefable", "ko": "픽시", "dex": 36}, "vulpix": {"en": "Vulpix", "ko": "식스테일", "dex": 37}, "ninetales": {"en": "Ninetales", "ko": "나인테일", "dex": 38}, "jigglypuff": {"en": "Jigglypuff", "ko": "푸린", "dex": 39}, "wigglytuff": {"en": "Wigglytuff", "ko": "푸크린", "dex": 40}, "zubat": {"en": "Zubat", "ko": "주뱃", "dex": 41}, "golbat": {"en": "Golbat", "ko": "골뱃", "dex": 42}, "oddish": {"en": "Oddish", "ko": "뚜벅쵸", "dex": 43}, "gloom": {"en": "Gloom", "ko": "냄새꼬", "dex": 44}, "vileplume": {"en": "Vileplume", "ko": "라플레시아", "dex": 45}, "paras": {"en": "Paras", "ko": "파라스", "dex": 46}, "parasect": {"en": "Parasect", "ko": "파라섹트", "dex": 47}, "venonat": {"en": "Venonat", "ko": "콘팡", "dex": 48}, "venomoth": {"en": "Venomoth", "ko": "도나리", "dex": 49}, "diglett": {"en": "Diglett", "ko": "디그다", "dex": 50}, "dugtrio": {"en": "Dugtrio", "ko": "닥트리오", "dex": 51}, "meowth": {"en": "Meowth", "ko": "나옹", "dex": 52}, "persian": {"en": "Persian", "ko": "페르시온", "dex": 53}, "psyduck": {"en": "Psyduck", "ko": "고라파덕", "dex": 54}, "golduck": {"en": "Golduck", "ko": "골덕", "dex": 55}, "mankey": {"en": "Mankey", "ko": "망키", "dex": 56}, "primeape": {"en": "Primeape", "ko": "성원숭", "dex": 57}, "growlithe": {"en": "Growlithe", "ko": "가디", "dex": 58}, "arcanine": {"en": "Arcanine", "ko": "윈디", "dex": 59}, "poliwag": {"en": "Poliwag", "ko": "발챙이", "dex": 60}, "poliwhirl": {"en": "Poliwhirl", "ko": "슈륙챙이", "dex": 61}, "poliwrath": {"en": "Poliwrath", "ko": "강챙이", "dex": 62}, "abra": {"en": "Abra", "ko": "캐이시", "dex": 63}, "kadabra": {"en": "Kadabra", "ko": "윤겔라", "dex": 64}, "alakazam": {"en": "Alakazam", "ko": "후딘", "dex": 65}, "machop": {"en": "Machop", "ko": "알통몬", "dex": 66}, "machoke": {"en": "Machoke", "ko": "근육몬", "dex": 67}, "machamp": {"en": "Machamp", "ko": "괴력몬", "dex": 68}, "bellsprout": {"en": "Bellsprout", "ko": "모다피", "dex": 69}, "weepinbell": {"en": "Weepinbell", "ko": "우츠동", "dex": 70}, "victreebel": {"en": "Victreebel", "ko": "우츠보트", "dex": 71}, "tentacool": {"en": "Tentacool", "ko": "왕눈해", "dex": 72}, "tentacruel": {"en": "Tentacruel", "ko": "독파리", "dex": 73}, "geodude": {"en": "Geodude", "ko": "꼬마돌", "dex": 74}, "graveler": {"en": "Graveler", "ko": "데구리", "dex": 75}, "golem": {"en": "Golem", "ko": "딱구리", "dex": 76}, "ponyta": {"en": "Ponyta", "ko": "포니타", "dex": 77}, "rapidash": {"en": "Rapidash", "ko": "날쌩마", "dex": 78}, "slowpoke": {"en": "Slowpoke", "ko": "야돈", "dex": 79}, "slowbro": {"en": "Slowbro", "ko": "야도란", "dex": 80}, "magnemite": {"en": "Magnemite", "ko": "코일", "dex": 81}, "magneton": {"en": "Magneton", "ko": "레어코일", "dex": 82}, "farfetch’d": {"en": "Farfetch’d", "ko": "파오리", "dex": 83}, "doduo": {"en": "Doduo", "ko": "두두", "dex": 84}, "dodrio": {"en": "Dodrio", "ko": "두트리오", "dex": 85}, "seel": {"en": "Seel", "ko": "쥬쥬", "dex": 86}, "dewgong": {"en": "Dewgong", "ko": "쥬레곤", "dex": 87}, "grimer": {"en": "Grimer", "ko": "질퍽이", "dex": 88}, "muk": {"en": "Muk", "ko": "질뻐기", "dex": 89}, "shellder": {"en": "Shellder", "ko": "셀러", "dex": 90}, "cloyster": {"en": "Cloyster", "ko": "파르셀", "dex": 91}, "gastly": {"en": "Gastly", "ko": "고오스", "dex": 92}, "haunter": {"en": "Haunter", "ko": "고우스트", "dex": 93}, "gengar": {"en": "Gengar", "ko": "팬텀", "dex": 94}, "onix": {"en": "Onix", "ko": "롱스톤", "dex": 95}, "drowzee": {"en": "Drowzee", "ko": "슬리프", "dex": 96}, "hypno": {"en": "Hypno", "ko": "슬리퍼", "dex": 97}, "krabby": {"en": "Krabby", "ko": "크랩", "dex": 98}, "kingler": {"en": "Kingler", "ko": "킹크랩", "dex": 99}, "voltorb": {"en": "Voltorb", "ko": "찌리리공", "dex": 100}, "electrode": {"en": "Electrode", "ko": "붐볼", "dex": 101}, "exeggcute": {"en": "Exeggcute", "ko": "아라리", "dex": 102}, "exeggutor": {"en": "Exeggutor", "ko": "나시", "dex": 103}, "cubone": {"en": "Cubone", "ko": "탕구리", "dex": 104}, "marowak": {"en": "Marowak", "ko": "텅구리", "dex": 105}, "hitmonlee": {"en": "Hitmonlee", "ko": "시라소몬", "dex": 106}, "hitmonchan": {"en": "Hitmonchan", "ko": "홍수몬", "dex": 107}, "lickitung": {"en": "Lickitung", "ko": "내루미", "dex": 108}, "koffing": {"en": "Koffing", "ko": "또가스", "dex": 109}, "weezing": {"en": "Weezing", "ko": "또도가스", "dex": 110}, "rhyhorn": {"en": "Rhyhorn", "ko": "뿔카노", "dex": 111}, "rhydon": {"en": "Rhydon", "ko": "코뿌리", "dex": 112}, "chansey": {"en": "Chansey", "ko": "럭키", "dex": 113}, "tangela": {"en": "Tangela", "ko": "덩쿠리", "dex": 114}, "kangaskhan": {"en": "Kangaskhan", "ko": "캥카", "dex": 115}, "horsea": {"en": "Horsea", "ko": "쏘드라", "dex": 116}, "seadra": {"en": "Seadra", "ko": "시드라", "dex": 117}, "goldeen": {"en": "Goldeen", "ko": "콘치", "dex": 118}, "seaking": {"en": "Seaking", "ko": "왕콘치", "dex": 119}, "staryu": {"en": "Staryu", "ko": "별가사리", "dex": 120}, "starmie": {"en": "Starmie", "ko": "아쿠스타", "dex": 121}, "mr. mime": {"en": "Mr. Mime", "ko": "마임맨", "dex": 122}, "scyther": {"en": "Scyther", "ko": "스라크", "dex": 123}, "jynx": {"en": "Jynx", "ko": "루주라", "dex": 124}, "electabuzz": {"en": "Electabuzz", "ko": "에레브", "dex": 125}, "magmar": {"en": "Magmar", "ko": "마그마", "dex": 126}, "pinsir": {"en": "Pinsir", "ko": "쁘사이저", "dex": 127}, "tauros": {"en": "Tauros", "ko": "켄타로스", "dex": 128}, "magikarp": {"en": "Magikarp", "ko": "잉어킹", "dex": 129}, "gyarados": {"en": "Gyarados", "ko": "갸라도스", "dex": 130}, "lapras": {"en": "Lapras", "ko": "라프라스", "dex": 131}, "ditto": {"en": "Ditto", "ko": "메타몽", "dex": 132}, "eevee": {"en": "Eevee", "ko": "이브이", "dex": 133}, "vaporeon": {"en": "Vaporeon", "ko": "샤미드", "dex": 134}, "jolteon": {"en": "Jolteon", "ko": "쥬피썬더", "dex": 135}, "flareon": {"en": "Flareon", "ko": "부스터", "dex": 136}, "porygon": {"en": "Porygon", "ko": "폴리곤", "dex": 137}, "omanyte": {"en": "Omanyte", "ko": "암나이트", "dex": 138}, "omastar": {"en": "Omastar", "ko": "암스타", "dex": 139}, "kabuto": {"en": "Kabuto", "ko": "투구", "dex": 140}, "kabutops": {"en": "Kabutops", "ko": "투구푸스", "dex": 141}, "aerodactyl": {"en": "Aerodactyl", "ko": "프테라", "dex": 142}, "snorlax": {"en": "Snorlax", "ko": "잠만보", "dex": 143}, "articuno": {"en": "Articuno", "ko": "프리져", "dex": 144}, "zapdos": {"en": "Zapdos", "ko": "썬더", "dex": 145}, "moltres": {"en": "Moltres", "ko": "파이어", "dex": 146}, "dratini": {"en": "Dratini", "ko": "미뇽", "dex": 147}, "dragonair": {"en": "Dragonair", "ko": "신뇽", "dex": 148}, "dragonite": {"en": "Dragonite", "ko": "망나뇽", "dex": 149}, "mewtwo": {"en": "Mewtwo", "ko": "뮤츠", "dex": 150}, "mew": {"en": "Mew", "ko": "뮤", "dex": 151}}')
 
@@ -61,192 +54,221 @@ EXAMPLE_IMG = {
 def load_names():
     table = POKEMON_NAMES
     idx = {norm(k): v for k, v in table.items()}
+    idx.update({norm(v.get("ko")): v for v in table.values() if v.get("ko")})
     return table, idx
 
 
-def norm(s: str) -> str:
-    s = s.lower().replace("♀", "f").replace("♂", "m")
-    return re.sub(r"[^a-z0-9]", "", s)
+"""퓨전 캡처 자동 처리 코어 — 실제 캡처(폰 스크린샷) 구조 대응판"""
+import re
+from difflib import SequenceMatcher
+import cv2, numpy as np
+from PIL import Image
+try:
+    import pytesseract
+except Exception:
+    pytesseract = None
+
+IMG_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
 
 
+def norm(s):
+    s = (s or '').lower().replace('♀', 'f').replace('♂', 'm')
+    return re.sub(r'[^a-z0-9가-힣]', '', s)
 
 
-def match_name(text: str, idx: dict, threshold: float = 0.70):
-    """OCR로 읽은 문자열에서 1세대 포켓몬 이름을 찾아낸다."""
-    cands = re.split(r"[^A-Za-z0-9♀♂.'\-]+", text)
+def match_name(text, idx, threshold=0.78):
+    """OCR 문자열에서 1세대 포켓몬 이름 찾기 (영어 이름만 사용)"""
+    if not text:
+        return None
+    en = {k: v for k, v in idx.items() if k.isascii() and len(k) >= 3}
     joined = norm(text)
-    c = norm(joined)
-    if c in idx:
-        return idx[c]
+    if joined in en:
+        return en[joined]
+    for key, val in en.items():          # 이름이 그대로 들어 있으면 우선 채택
+        if len(key) >= 4 and key in joined:
+            return val
     best, bestr = None, 0.0
-    for tok in cands:
+    for tok in re.split(r'[^A-Za-z0-9♀♂]+', text):
         t = norm(tok)
-        if len(t) < 3:
+        if len(t) < 4:
             continue
-        for key, val in idx.items():
+        for key, val in en.items():
             if abs(len(key) - len(t)) > 3:
                 continue
             r = SequenceMatcher(None, t, key).ratio()
             if key.startswith(t) or t.startswith(key):
-                r += 0.10
+                r += 0.08
             if r > bestr:
                 best, bestr = val, r
-    # 이름이 공백 없이 붙어 읽힌 경우 ("RandomVileplume")
-    if bestr < threshold:
-        for key, val in idx.items():
-            if key in joined:
-                return val
     return best if bestr >= threshold else None
 
 
-# ---------------------------------------------------------------- 영역 검출
-def _bg_color(rgb: np.ndarray) -> np.ndarray:
+# ------------------------------------------------------------- 영역 검출
+def _bg_color(rgb):
     h, w, _ = rgb.shape
-    band = 2
-    border = np.concatenate([
-        rgb[:band].reshape(-1, 3), rgb[-band:].reshape(-1, 3),
-        rgb[:, :band].reshape(-1, 3), rgb[:, -band:].reshape(-1, 3),
-    ])
+    b = 2
+    border = np.concatenate([rgb[:b].reshape(-1, 3), rgb[-b:].reshape(-1, 3),
+                             rgb[:, :b].reshape(-1, 3), rgb[:, -b:].reshape(-1, 3)])
     q = (border // 8).astype(np.int32)
     keys = q[:, 0] * 1024 + q[:, 1] * 32 + q[:, 2]
     vals, counts = np.unique(keys, return_counts=True)
-    k = vals[np.argmax(counts)]
-    sel = keys == k
-    return border[sel].mean(axis=0)
+    return border[keys == vals[np.argmax(counts)]].mean(axis=0)
 
 
-def find_blobs(path: str, debug_dir: str | None = None):
-    pil = Image.open(path).convert("RGB")
+def find_blobs(path, debug_dir=None):
+    """캡처 → {fused,left,right} 영역. 폰 스크린샷의 상태바/주소창/배너/하단바를 걸러낸다."""
+    pil = Image.open(path).convert('RGB')
     rgb = np.asarray(pil)
-    h, w, _ = rgb.shape
+    H, W, _ = rgb.shape
     bg = _bg_color(rgb)
     diff = np.abs(rgb.astype(np.int16) - bg[None, None, :].astype(np.int16)).max(axis=2)
     mask = (diff > 30).astype(np.uint8) * 255
-
-    k = max(3, int(round(min(h, w) / 90)) | 1)
+    k = max(3, int(round(min(H, W) / 90)) | 1)
     kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern, iterations=2)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kern, iterations=1)
-    # 얇은 테두리(브라우저 프레임) 제거
-    mask[: max(2, h // 200)] = 0
-    mask[-max(2, h // 200):] = 0
-    mask[:, : max(2, w // 200)] = 0
-    mask[:, -max(2, w // 200):] = 0
 
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    colorful = ((hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 70)).astype(np.uint8)
     n, lab, stats, cent = cv2.connectedComponentsWithStats(mask, 8)
-    area_min = 0.004 * h * w
     blobs = []
     for i in range(1, n):
-        x, y, bw, bh, a = stats[i]
-        if a < area_min or bw < 0.05 * w or bh < 0.05 * h:
+        x, y, w, h, a = [int(v) for v in stats[i]]
+        cy = y + h / 2.0
+        if cy < 0.045 * H or y > 0.93 * H:        # 상태바 / 하단 내비게이션
             continue
-        blobs.append({"x": int(x), "y": int(y), "w": int(bw), "h": int(bh), "area": int(a)})
-    blobs.sort(key=lambda b: -b["area"])
+        if w > 0.85 * W and h < 0.22 * H:          # 사이트 상단 배너
+            continue
+        if a < 0.00035 * W * H or w < 0.015 * W or h < 0.012 * H:
+            continue
+        cf = float(colorful[y:y + h, x:x + w].mean())
+        blobs.append({'x': x, 'y': y, 'w': w, 'h': h, 'area': a,
+                      'ar': w / max(1.0, h), 'fill': a / max(1.0, w * h), 'color': cf})
+    blobs.sort(key=lambda b: -b['area'])
 
     if debug_dir:
         os.makedirs(debug_dir, exist_ok=True)
         viz = rgb.copy()
         for b in blobs:
-            cv2.rectangle(viz, (b["x"], b["y"]), (b["x"] + b["w"], b["y"] + b["h"]), (255, 0, 0), 2)
-        Image.fromarray(viz).save(os.path.join(debug_dir, "debug_" + os.path.basename(path)))
+            cv2.rectangle(viz, (b['x'], b['y']), (b['x'] + b['w'], b['y'] + b['h']), (255, 0, 0), 2)
+        Image.fromarray(viz).save(os.path.join(debug_dir, 'debug_' + os.path.basename(path)))
 
-    if len(blobs) < 3:
-        return pil, blobs, bg
+    def shape_ok(b):
+        return 0.25 <= b['ar'] <= 3.2
 
-    # --- 좌/우 = 하단에서 가로로 떨어져 있는 굵직한 두 덩어리
-    lower = [b for b in blobs if b["y"] > 0.35 * h]
-    lower.sort(key=lambda b: -b["area"])
-    pair = None
-    for i in range(min(len(lower), 6)):
-        for j in range(i + 1, min(len(lower), 6)):
-            a, b = lower[i], lower[j]
-            gap = abs((a["x"] + a["w"] / 2) - (b["x"] + b["w"] / 2))
-            if gap < 0.22 * w:
+    ups = [b for b in blobs if (b['y'] + b['h'] / 2.0) < 0.62 * H and shape_ok(b)]
+    fused = max(ups, key=lambda b: b['area']) if ups else (blobs[0] if blobs else None)
+    if fused is None:
+        return pil, None, bg
+
+    fb = fused['y'] + fused['h']
+    # 좌/우 후보: 속이 채워진 그림(테두리만 있는 입력상자/드롭다운은 제외)
+    cands = [b for b in blobs if b is not fused and shape_ok(b) and b['fill'] >= 0.30
+             and b['color'] >= 0.02
+             and b['y'] > fb - 0.02 * H and (b['y'] + b['h']) < 0.92 * H]
+
+    best = None
+    for i, a in enumerate(cands):
+        for b in cands[i + 1:]:
+            L, R = (a, b) if a['x'] < b['x'] else (b, a)
+            Lc = L['x'] + L['w'] / 2.0
+            Rc = R['x'] + R['w'] / 2.0
+            gap = R['x'] - (L['x'] + L['w'])
+            if Lc > 0.48 * W or Rc < 0.52 * W:
                 continue
-            if max(a["y"] + a["h"], b["y"] + b["h"]) - min(a["y"], b["y"]) > 0.9 * h:
+            if gap < 0.08 * W:
                 continue
-            pair = (a, b)
-            break
-        if pair:
-            break
-    if pair is None:
-        lower.sort(key=lambda b: b["x"])
-        pair = (lower[0], lower[-1]) if len(lower) >= 2 else None
-    if pair is None:
-        return pil, blobs, bg
-    left, right = sorted(pair, key=lambda b: b["x"])
+            if abs((L['y'] + L['h'] / 2.0) - (R['y'] + R['h'] / 2.0)) > 0.15 * H:
+                continue
+            score = L['area'] + R['area'] + 0.4 * gap
+            if best is None or score > best[0]:
+                best = (score, L, R)
 
-    # --- 위 = 좌/우 덩어리보다 위에 있는 가장 큰 덩어리
-    top_limit = min(left["y"], right["y"]) - 0.02 * h
-    uppers = [b for b in blobs if b["y"] + b["h"] <= top_limit]
-    fused = max(uppers, key=lambda b: b["area"]) if uppers else None
-    if fused is None:  # 레이아웃이 다르면 전체에서 가장 큰 덩어리
-        fused = blobs[0]
+    if best:
+        return pil, {'fused': fused, 'left': best[1], 'right': best[2]}, bg
 
-    return pil, {"fused": fused, "left": left, "right": right}, bg
+    # 2차: 하단 영역에서 좌/우 분리 (이름 상자가 없는 캡처)
+    low = sorted(cands or blobs, key=lambda b: -b['area'])
+    lefts = [b for b in low if b['x'] + b['w'] / 2.0 < 0.5 * W]
+    rights = [b for b in low if b['x'] + b['w'] / 2.0 >= 0.5 * W]
+    if lefts and rights:
+        return pil, {'fused': fused, 'left': lefts[0], 'right': rights[0]}, bg
+    return pil, None, bg
 
 
-def crop_with_pad(pil: Image.Image, box: dict, pad: float):
-    w, h = pil.size
-    px, py = int(box["w"] * pad) + 4, int(box["h"] * pad) + 4
-    x0 = max(0, box["x"] - px)
-    y0 = max(0, box["y"] - py)
-    x1 = min(w, box["x"] + box["w"] + px)
-    y1 = min(h, box["y"] + box["h"] + py)
-    return pil.crop((x0, y0, x1, y1))
+def crop_with_pad(pil, box, pad):
+    W, H = pil.size
+    px, py = int(box['w'] * pad) + 4, int(box['h'] * pad) + 4
+    return pil.crop((max(0, box['x'] - px), max(0, box['y'] - py),
+                     min(W, box['x'] + box['w'] + px), min(H, box['y'] + box['h'] + py)))
 
 
-def ocr_names(pil: Image.Image, fused: dict, col: dict, bg, which: str):
-    """좌/우 열의 이름 라벨을 읽는다(열 폭 안에서 합성 이미지 아래 전체를 훑는다)."""
-    if pytesseract is None:
-        return None, ""
-    w, h = pil.size
-    y0 = max(0, fused["y"] + fused["h"] - int(0.06 * h))
-    y1 = min(h, col["y"] + col["h"] + int(0.05 * h))
-    x0 = max(0, col["x"] - int(0.10 * col["w"]) - 8)
-    x1 = min(w, col["x"] + col["w"] + int(0.10 * col["w"]) + 8)
-    band = pil.crop((x0, y0, x1, y1))
-    if band.width < 900:
-        s = 900 / band.width
-        band = band.resize((int(band.width * s), int(band.height * s)), Image.LANCZOS)
-    arr = cv2.cvtColor(np.asarray(band), cv2.COLOR_RGB2GRAY)
-    arr = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-    txt = ""
-    for psm in (11, 6, 4):
-        try:
-            t = pytesseract.image_to_string(arr, config=f"--psm {psm}")
-        except Exception:
-            t = ""
-        txt += " " + t
-        if t.strip():
-            break
-    return txt.strip(), txt
-
-
-def process_capture(path, idx, table, manual_pair=None, pad=0.07, debug_dir=None):
-    """캡처 1장 → {'fused','left','right' (PIL 이미지), 'left_name','right_name' (dict|None)}.
-    영역 검출 실패 시 None."""
-    pil, boxes, bg = find_blobs(path, debug_dir)
-    if not isinstance(boxes, dict):
-        return None
-    left_name = right_name = None
-    if manual_pair:
-        l, r = manual_pair
-        left_name = (idx.get(norm(l)) or lookup_ko(l, table)) if l else None
-        right_name = (idx.get(norm(r)) or lookup_ko(r, table)) if r else None
-    raw_l = raw_r = ""
-    if left_name is None or right_name is None:
-        _, raw_l = ocr_names(pil, boxes["fused"], boxes["left"], bg, "left")
-        _, raw_r = ocr_names(pil, boxes["fused"], boxes["right"], bg, "right")
-        left_name = left_name or match_name(raw_l or "", idx)
-        right_name = right_name or match_name(raw_r or "", idx)
-    out = {k: crop_with_pad(pil, boxes[k], pad) for k in ("fused", "left", "right")}
-    out.update(left_name=left_name, right_name=right_name, raw_l=raw_l or "", raw_r=raw_r or "")
+# ------------------------------------------------------------- 글자 읽기
+def _ocr_texts(pil, box, upscale=None, psms=(6, 7, 11)):
+    x0, y0, x1, y1 = [int(v) for v in box]
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return []
+    crop = pil.crop((x0, y0, x1, y1))
+    g = cv2.cvtColor(np.asarray(crop), cv2.COLOR_RGB2GRAY)
+    if upscale is None:
+        upscale = max(1.0, 1400.0 / max(1, g.shape[1]))
+    if upscale > 1.05:
+        g = cv2.resize(g, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
+    binimg = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    out = []
+    for img in (binimg, g):
+        for p in psms:
+            try:
+                t = pytesseract.image_to_string(img, config='--psm %d' % p).strip()
+            except Exception:
+                t = ''
+            if t:
+                out.append(t)
     return out
 
 
+def ocr_permalink_dex(pil):
+    """주소창의 기능: 캡처 하단 'Permalink: .../43/93' → (왼쪽 도감번호, 오른쪽 도감번호)"""
+    W, H = pil.size
+    for a, b in ((0.83, 1.0), (0.5, 1.0)):
+        for t in _ocr_texts(pil, (0, int(H * a), W, int(H * b)),
+                            upscale=max(2.0, 1700.0 / max(1, W)), psms=(6, 11, 7)):
+            s = t.replace(' ', '')
+            m = re.search(r'net/(\d{1,3})/(\d{1,3})', s)
+            if m:
+                d1, d2 = int(m.group(1)), int(m.group(2))
+                if 1 <= d1 <= 151 and 1 <= d2 <= 151:
+                    return d1, d2
+    return None
+
+
+def ocr_name_near(pil, box, idx):
+    """포켓몬 그림 바로 위(이름 상자) 글자 읽기 — 여러 크기로 시도"""
+    W, H = pil.size
+    x, y, w, h = box['x'], box['y'], box['w'], box['h']
+    tries = []
+    for fh in (1.5, 2.1, 1.0):
+        for fw in (0.7, 1.3):
+            y0 = max(0, int(y - fh * h)); y1 = max(1, int(y - 0.04 * h))
+            x0 = max(0, int(x - fw * w)); x1 = min(W, int(x + w + fw * w))
+            if y1 - y0 > 8 and x1 - x0 > 8:
+                tries.append((x0, y0, x1, y1))
+    for box2 in tries:
+        for t in _ocr_texts(pil, box2, psms=(6, 7, 8, 11)):
+            m = match_name(t, idx)
+            if m:
+                return m
+    return None
+
+
+def by_dex(table, dex):
+    for v in table.values():
+        if v.get("dex") == dex:
+            return v
+    return None
+
+
 def lookup_ko(name, table):
-    """한글 이름으로도 찾을 수 있게."""
     name = (name or "").strip()
     for v in table.values():
         if v.get("ko") == name:
@@ -254,6 +276,37 @@ def lookup_ko(name, table):
     return table.get(name.lower())
 
 
+def process_capture(path, idx, table, manual_pair=None, pad=0.07, debug_dir=None):
+    """캡처 1장 → 잘라낸 3그림 + 한글 이름. 실패하면 None."""
+    pil, boxes, bg = find_blobs(path, debug_dir=debug_dir)
+    if boxes is None:
+        return None
+    warn = []
+    ln = rn = None
+    if manual_pair:
+        l, r = manual_pair
+        ln = (idx.get(norm(l)) or lookup_ko(l, table)) if l else None
+        rn = (idx.get(norm(r)) or lookup_ko(r, table)) if r else None
+
+    if pytesseract is not None and (ln is None or rn is None):
+        v_l = ocr_name_near(pil, boxes["left"], idx)
+        v_r = ocr_name_near(pil, boxes["right"], idx)
+        perm = ocr_permalink_dex(pil)
+        if perm:
+            p_l, p_r = by_dex(table, perm[0]), by_dex(table, perm[1])
+            if v_l and v_r and (v_l["dex"], v_r["dex"]) == perm:
+                ln, rn = ln or v_l, rn or v_r          # 두 방법 일치 = 확실
+            elif v_l and v_r:
+                warn.append("주소창(%s/%s)과 이름표시(%s/%s)가 달라 이름표시를 사용"
+                            % (perm[0], perm[1], v_l["dex"], v_r["dex"]))
+                ln, rn = ln or v_l, rn or v_r
+            else:
+                ln, rn = ln or v_l or p_l, rn or v_r or p_r
+        else:
+            ln, rn = ln or v_l, rn or v_r
+    out = {k: crop_with_pad(pil, boxes[k], pad) for k in ("fused", "left", "right")}
+    out.update(left_name=ln, right_name=rn, warn=warn)
+    return out
 
 # --------------------------------------------------------------------- 자원
 @st.cache_data(show_spinner=False)
@@ -341,10 +394,13 @@ def _process_captures(sig):
         try:
             r = process_capture(str(ROOT / fname), idx, table, manual.get(Path(fname).name))
         except Exception as e:  # 한 장이 깨져도 게임은 계속
-            r = None
-        if r is None:
-            problems.append((Path(fname).name, "포켓몬 3마리 영역을 찾지 못함"))
+            problems.append((Path(fname).name, "오류: %s" % e))
             continue
+        if r is None:
+            problems.append((Path(fname).name, "합성/좌/우 그림을 찾지 못함"))
+            continue
+        for _w in r.get("warn", []):
+            problems.append((Path(fname).name, _w))
         ln, rn = r["left_name"], r["right_name"]
         if ln and rn:
             key = (ln["dex"], rn["dex"])
