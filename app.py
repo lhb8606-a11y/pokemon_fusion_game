@@ -37,6 +37,7 @@ BGM_PATH = ROOT / "bgm.mp3" if (ROOT / "bgm.mp3").exists() else ROOT / "assets" 
 
 
 
+
 # =====================================================================
 #  캡처 자동 처리 (이 파일 안에 모두 포함 — 다른 폴더가 없어도 동작)
 # =====================================================================
@@ -58,17 +59,32 @@ def load_names():
     return table, idx
 
 
-"""퓨전 캡처 자동 처리 코어 — 실제 캡처(폰 스크린샷) 구조 대응판"""
+"""퓨전 캡처 자동 처리 코어 (폰 캡처 구조 대응 / 속도 개선판)
+
+캡처 위치가 항상 같다는 점을 이용해 '정해진 구역'만 보고 잘라낸다.
+이름은 주소창의 도련번호(...net/43/93)를 OCR 1회로 읽는다.
+"""
 import re
 from difflib import SequenceMatcher
-import cv2, numpy as np
+
+import cv2
+import numpy as np
 from PIL import Image
+
 try:
     import pytesseract
 except Exception:
     pytesseract = None
 
 IMG_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
+
+# 캡처 안에서 포켓몬이 항상 있는 구역 (가로/세로 비율) — 여기만 검사
+LAYOUT = {
+    "fused": (0.18, 0.24, 0.82, 0.53),
+    "left":  (0.04, 0.52, 0.50, 0.73),
+    "right": (0.50, 0.52, 0.96, 0.73),
+}
+PERMALINK_BAND = (0.0, 0.84, 1.0, 1.0)
 
 
 def norm(s):
@@ -84,7 +100,7 @@ def match_name(text, idx, threshold=0.78):
     joined = norm(text)
     if joined in en:
         return en[joined]
-    for key, val in en.items():          # 이름이 그대로 들어 있으면 우선 채택
+    for key, val in en.items():
         if len(key) >= 4 and key in joined:
             return val
     best, bestr = None, 0.0
@@ -103,164 +119,6 @@ def match_name(text, idx, threshold=0.78):
     return best if bestr >= threshold else None
 
 
-# ------------------------------------------------------------- 영역 검출
-def _bg_color(rgb):
-    h, w, _ = rgb.shape
-    b = 2
-    border = np.concatenate([rgb[:b].reshape(-1, 3), rgb[-b:].reshape(-1, 3),
-                             rgb[:, :b].reshape(-1, 3), rgb[:, -b:].reshape(-1, 3)])
-    q = (border // 8).astype(np.int32)
-    keys = q[:, 0] * 1024 + q[:, 1] * 32 + q[:, 2]
-    vals, counts = np.unique(keys, return_counts=True)
-    return border[keys == vals[np.argmax(counts)]].mean(axis=0)
-
-
-def find_blobs(path, debug_dir=None):
-    """캡처 → {fused,left,right} 영역. 폰 스크린샷의 상태바/주소창/배너/하단바를 걸러낸다."""
-    pil = Image.open(path).convert('RGB')
-    rgb = np.asarray(pil)
-    H, W, _ = rgb.shape
-    bg = _bg_color(rgb)
-    diff = np.abs(rgb.astype(np.int16) - bg[None, None, :].astype(np.int16)).max(axis=2)
-    mask = (diff > 30).astype(np.uint8) * 255
-    k = max(3, int(round(min(H, W) / 90)) | 1)
-    kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern, iterations=2)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kern, iterations=1)
-
-    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
-    colorful = ((hsv[:, :, 1] > 60) & (hsv[:, :, 2] > 70)).astype(np.uint8)
-    n, lab, stats, cent = cv2.connectedComponentsWithStats(mask, 8)
-    blobs = []
-    for i in range(1, n):
-        x, y, w, h, a = [int(v) for v in stats[i]]
-        cy = y + h / 2.0
-        if cy < 0.045 * H or y > 0.93 * H:        # 상태바 / 하단 내비게이션
-            continue
-        if w > 0.85 * W and h < 0.22 * H:          # 사이트 상단 배너
-            continue
-        if a < 0.00035 * W * H or w < 0.015 * W or h < 0.012 * H:
-            continue
-        cf = float(colorful[y:y + h, x:x + w].mean())
-        blobs.append({'x': x, 'y': y, 'w': w, 'h': h, 'area': a,
-                      'ar': w / max(1.0, h), 'fill': a / max(1.0, w * h), 'color': cf})
-    blobs.sort(key=lambda b: -b['area'])
-
-    if debug_dir:
-        os.makedirs(debug_dir, exist_ok=True)
-        viz = rgb.copy()
-        for b in blobs:
-            cv2.rectangle(viz, (b['x'], b['y']), (b['x'] + b['w'], b['y'] + b['h']), (255, 0, 0), 2)
-        Image.fromarray(viz).save(os.path.join(debug_dir, 'debug_' + os.path.basename(path)))
-
-    def shape_ok(b):
-        return 0.25 <= b['ar'] <= 3.2
-
-    ups = [b for b in blobs if (b['y'] + b['h'] / 2.0) < 0.62 * H and shape_ok(b)]
-    fused = max(ups, key=lambda b: b['area']) if ups else (blobs[0] if blobs else None)
-    if fused is None:
-        return pil, None, bg
-
-    fb = fused['y'] + fused['h']
-    # 좌/우 후보: 속이 채워진 그림(테두리만 있는 입력상자/드롭다운은 제외)
-    cands = [b for b in blobs if b is not fused and shape_ok(b) and b['fill'] >= 0.30
-             and b['color'] >= 0.02
-             and b['y'] > fb - 0.02 * H and (b['y'] + b['h']) < 0.92 * H]
-
-    best = None
-    for i, a in enumerate(cands):
-        for b in cands[i + 1:]:
-            L, R = (a, b) if a['x'] < b['x'] else (b, a)
-            Lc = L['x'] + L['w'] / 2.0
-            Rc = R['x'] + R['w'] / 2.0
-            gap = R['x'] - (L['x'] + L['w'])
-            if Lc > 0.48 * W or Rc < 0.52 * W:
-                continue
-            if gap < 0.08 * W:
-                continue
-            if abs((L['y'] + L['h'] / 2.0) - (R['y'] + R['h'] / 2.0)) > 0.15 * H:
-                continue
-            score = L['area'] + R['area'] + 0.4 * gap
-            if best is None or score > best[0]:
-                best = (score, L, R)
-
-    if best:
-        return pil, {'fused': fused, 'left': best[1], 'right': best[2]}, bg
-
-    # 2차: 하단 영역에서 좌/우 분리 (이름 상자가 없는 캡처)
-    low = sorted(cands or blobs, key=lambda b: -b['area'])
-    lefts = [b for b in low if b['x'] + b['w'] / 2.0 < 0.5 * W]
-    rights = [b for b in low if b['x'] + b['w'] / 2.0 >= 0.5 * W]
-    if lefts and rights:
-        return pil, {'fused': fused, 'left': lefts[0], 'right': rights[0]}, bg
-    return pil, None, bg
-
-
-def crop_with_pad(pil, box, pad):
-    W, H = pil.size
-    px, py = int(box['w'] * pad) + 4, int(box['h'] * pad) + 4
-    return pil.crop((max(0, box['x'] - px), max(0, box['y'] - py),
-                     min(W, box['x'] + box['w'] + px), min(H, box['y'] + box['h'] + py)))
-
-
-# ------------------------------------------------------------- 글자 읽기
-def _ocr_texts(pil, box, upscale=None, psms=(6, 7, 11)):
-    x0, y0, x1, y1 = [int(v) for v in box]
-    if x1 - x0 < 4 or y1 - y0 < 4:
-        return []
-    crop = pil.crop((x0, y0, x1, y1))
-    g = cv2.cvtColor(np.asarray(crop), cv2.COLOR_RGB2GRAY)
-    if upscale is None:
-        upscale = max(1.0, 1400.0 / max(1, g.shape[1]))
-    if upscale > 1.05:
-        g = cv2.resize(g, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
-    binimg = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-    out = []
-    for img in (binimg, g):
-        for p in psms:
-            try:
-                t = pytesseract.image_to_string(img, config='--psm %d' % p).strip()
-            except Exception:
-                t = ''
-            if t:
-                out.append(t)
-    return out
-
-
-def ocr_permalink_dex(pil):
-    """주소창의 기능: 캡처 하단 'Permalink: .../43/93' → (왼쪽 도감번호, 오른쪽 도감번호)"""
-    W, H = pil.size
-    for a, b in ((0.83, 1.0), (0.5, 1.0)):
-        for t in _ocr_texts(pil, (0, int(H * a), W, int(H * b)),
-                            upscale=max(2.0, 1700.0 / max(1, W)), psms=(6, 11, 7)):
-            s = t.replace(' ', '')
-            m = re.search(r'net/(\d{1,3})/(\d{1,3})', s)
-            if m:
-                d1, d2 = int(m.group(1)), int(m.group(2))
-                if 1 <= d1 <= 151 and 1 <= d2 <= 151:
-                    return d1, d2
-    return None
-
-
-def ocr_name_near(pil, box, idx):
-    """포켓몬 그림 바로 위(이름 상자) 글자 읽기 — 여러 크기로 시도"""
-    W, H = pil.size
-    x, y, w, h = box['x'], box['y'], box['w'], box['h']
-    tries = []
-    for fh in (1.5, 2.1, 1.0):
-        for fw in (0.7, 1.3):
-            y0 = max(0, int(y - fh * h)); y1 = max(1, int(y - 0.04 * h))
-            x0 = max(0, int(x - fw * w)); x1 = min(W, int(x + w + fw * w))
-            if y1 - y0 > 8 and x1 - x0 > 8:
-                tries.append((x0, y0, x1, y1))
-    for box2 in tries:
-        for t in _ocr_texts(pil, box2, psms=(6, 7, 8, 11)):
-            m = match_name(t, idx)
-            if m:
-                return m
-    return None
-
-
 def by_dex(table, dex):
     for v in table.values():
         if v.get("dex") == dex:
@@ -276,9 +134,168 @@ def lookup_ko(name, table):
     return table.get(name.lower())
 
 
+# --------------------------------------------------------------- 영역 검출
+def _bg_color(rgb):
+    h, w, _ = rgb.shape
+    b = 2
+    border = np.concatenate([rgb[:b].reshape(-1, 3), rgb[-b:].reshape(-1, 3),
+                             rgb[:, :b].reshape(-1, 3), rgb[:, -b:].reshape(-1, 3)])
+    q = (border // 8).astype(np.int32)
+    keys = q[:, 0] * 1024 + q[:, 1] * 32 + q[:, 2]
+    vals, counts = np.unique(keys, return_counts=True)
+    return border[keys == vals[np.argmax(counts)]].mean(axis=0)
+
+
+def _mask(rgb):
+    """배경도 아니고 색이 있는 픽셀 = 포켓몬 그림 후보"""
+    bg = _bg_color(rgb)
+    diff = (np.abs(rgb.astype(np.int16) - bg[None, None, :].astype(np.int16)).max(axis=2) > 30)
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    colorful = (hsv[:, :, 1] > 55) & (hsv[:, :, 2] > 60)
+    return (diff & colorful).astype(np.uint8) * 255
+
+
+def _best_blob(mask, win):
+    x0, y0, x1, y1 = win
+    sub = mask[y0:y1, x0:x1]
+    if sub.size == 0:
+        return None
+    k = max(3, int(round(min(sub.shape[:2]) / 40)) | 1)
+    sub = cv2.morphologyEx(sub, cv2.MORPH_CLOSE,
+                           cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)), iterations=2)
+    n, lab, stats, cent = cv2.connectedComponentsWithStats(sub, 8)
+    best = None
+    for i in range(1, n):
+        x, y, w, h, a = [int(v) for v in stats[i]]
+        if a < 0.0015 * sub.size or w < 6 or h < 6:
+            continue
+        if w > 0.92 * (x1 - x0) and h < 0.15 * (y1 - y0):   # 가로로 긴 선/테두리
+            continue
+        if h > 0.92 * (y1 - y0) and w < 0.15 * (x1 - x0):
+            continue
+        if best is None or a > best['area']:
+            best = {'x': x0 + x, 'y': y0 + y, 'w': w, 'h': h, 'area': a}
+    return best
+
+
+def _win(pil, frac):
+    W, H = pil.size
+    return (int(frac[0] * W), int(frac[1] * H), int(frac[2] * W), int(frac[3] * H))
+
+
+def find_blobs(path, debug_dir=None):
+    """캡처 → {fused,left,right} 영역. 정해진 구역만 검사하므로 빠르다."""
+    pil = Image.open(path).convert('RGB')
+    rgb = np.asarray(pil)
+    mask = _mask(rgb)
+    boxes = {}
+    for key in ("fused", "left", "right"):
+        b = _best_blob(mask, _win(pil, LAYOUT[key]))
+        if b:
+            boxes[key] = b
+    if debug_dir:
+        import os
+        os.makedirs(debug_dir, exist_ok=True)
+        viz = rgb.copy()
+        for k, b in boxes.items():
+            cv2.rectangle(viz, (b['x'], b['y']), (b['x'] + b['w'], b['y'] + b['h']), (255, 0, 0), 2)
+        Image.fromarray(viz).save(os.path.join(debug_dir, 'debug_' + os.path.basename(path)))
+    return pil, (boxes if len(boxes) == 3 else None), None
+
+
+def find_blobs_auto(path):
+    """예비: 정해진 구역에서 못 찾았을 때 전체에서 찾는다(느리지만 구조가 다른 캡처 대응)."""
+    pil = Image.open(path).convert('RGB')
+    rgb = np.asarray(pil)
+    H, W, _ = rgb.shape
+    mask = _mask(rgb)
+    k = max(3, int(round(min(H, W) / 90)) | 1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
+                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)), iterations=2)
+    n, lab, stats, cent = cv2.connectedComponentsWithStats(mask, 8)
+    blobs = []
+    for i in range(1, n):
+        x, y, w, h, a = [int(v) for v in stats[i]]
+        if y + h / 2.0 < 0.045 * H or y > 0.93 * H:
+            continue
+        if w > 0.85 * W and h < 0.22 * H:
+            continue
+        if a < 0.00035 * W * H or w < 0.015 * W or h < 0.012 * H:
+            continue
+        if not (0.25 <= w / max(1.0, h) <= 3.2):
+            continue
+        blobs.append({'x': x, 'y': y, 'w': w, 'h': h, 'area': a})
+    if not blobs:
+        return pil, None
+    blobs.sort(key=lambda b: -b['area'])
+    fused = next((b for b in blobs if (b['y'] + b['h'] / 2.0) < 0.62 * H), blobs[0])
+    low = [b for b in blobs if b is not fused and b['y'] > fused['y'] + fused['h'] - 0.02 * H]
+    lefts = [b for b in low if b['x'] + b['w'] / 2.0 < 0.5 * W]
+    rights = [b for b in low if b['x'] + b['w'] / 2.0 >= 0.5 * W]
+    if lefts and rights:
+        return pil, {'fused': fused, 'left': max(lefts, key=lambda b: b['area']),
+                     'right': max(rights, key=lambda b: b['area'])}
+    return pil, None
+
+
+def crop_with_pad(pil, box, pad):
+    W, H = pil.size
+    px, py = int(box['w'] * pad) + 3, int(box['h'] * pad) + 3
+    return pil.crop((max(0, box['x'] - px), max(0, box['y'] - py),
+                     min(W, box['x'] + box['w'] + px), min(H, box['y'] + box['h'] + py)))
+
+
+# --------------------------------------------------------------- 글자 읽기
+def _ocr(pil, box, psm=6, upscale=None):
+    x0, y0, x1, y1 = [int(v) for v in box]
+    if x1 - x0 < 6 or y1 - y0 < 6:
+        return ""
+    g = cv2.cvtColor(np.asarray(pil.crop((x0, y0, x1, y1))), cv2.COLOR_RGB2GRAY)
+    if upscale is None:
+        upscale = max(1.0, 1200.0 / max(1, g.shape[1]))
+    if upscale > 1.05:
+        g = cv2.resize(g, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
+    g = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    try:
+        return pytesseract.image_to_string(g, config='--psm %d' % psm).strip()
+    except Exception:
+        return ""
+
+
+def ocr_permalink_dex(pil):
+    """주소창 'Permalink: ...net/43/93' → (왼쪽 도감번호, 오른쪽 도감번호). OCR 1회."""
+    W, H = pil.size
+    box = (int(PERMALINK_BAND[0] * W), int(PERMALINK_BAND[1] * H),
+           int(PERMALINK_BAND[2] * W), int(PERMALINK_BAND[3] * H))
+    for psm in (6, 11):
+        t = _ocr(pil, box, psm=psm, upscale=max(2.0, 1600.0 / max(1, W)))
+        m = re.search(r'net/(\d{1,3})/(\d{1,3})', t.replace(' ', ''))
+        if m:
+            d1, d2 = int(m.group(1)), int(m.group(2))
+            if 1 <= d1 <= 151 and 1 <= d2 <= 151:
+                return d1, d2
+    return None
+
+
+def ocr_name_near(pil, box, idx):
+    """포켓몬 그림 위(이름 상자) 글자 읽기 — 2구역만 시도"""
+    W, H = pil.size
+    x, y, w, h = box['x'], box['y'], box['w'], box['h']
+    for fh, fw in ((1.6, 0.8), (2.2, 1.2)):
+        y0, y1 = max(0, int(y - fh * h)), max(1, int(y - 0.04 * h))
+        x0, x1 = max(0, int(x - fw * w)), min(W, int(x + w + fw * w))
+        for psm in (6, 7):
+            m = match_name(_ocr(pil, (x0, y0, x1, y1), psm=psm), idx)
+            if m:
+                return m
+    return None
+
+
 def process_capture(path, idx, table, manual_pair=None, pad=0.07, debug_dir=None):
     """캡처 1장 → 잘라낸 3그림 + 한글 이름. 실패하면 None."""
-    pil, boxes, bg = find_blobs(path, debug_dir=debug_dir)
+    pil, boxes, _ = find_blobs(path, debug_dir=debug_dir)
+    if boxes is None:                     # 폰 캡처가 아니면 예비 검출로 한 번 더
+        pil, boxes = find_blobs_auto(path)
     if boxes is None:
         return None
     warn = []
@@ -289,21 +306,16 @@ def process_capture(path, idx, table, manual_pair=None, pad=0.07, debug_dir=None
         rn = (idx.get(norm(r)) or lookup_ko(r, table)) if r else None
 
     if pytesseract is not None and (ln is None or rn is None):
-        v_l = ocr_name_near(pil, boxes["left"], idx)
-        v_r = ocr_name_near(pil, boxes["right"], idx)
-        perm = ocr_permalink_dex(pil)
+        perm = ocr_permalink_dex(pil)              # 1) 주소창 도감번호 (빠름)
         if perm:
-            p_l, p_r = by_dex(table, perm[0]), by_dex(table, perm[1])
-            if v_l and v_r and (v_l["dex"], v_r["dex"]) == perm:
-                ln, rn = ln or v_l, rn or v_r          # 두 방법 일치 = 확실
-            elif v_l and v_r:
-                warn.append("주소창(%s/%s)과 이름표시(%s/%s)가 달라 이름표시를 사용"
-                            % (perm[0], perm[1], v_l["dex"], v_r["dex"]))
-                ln, rn = ln or v_l, rn or v_r
-            else:
-                ln, rn = ln or v_l or p_l, rn or v_r or p_r
-        else:
-            ln, rn = ln or v_l, rn or v_r
+            ln = ln or by_dex(table, perm[0])
+            rn = rn or by_dex(table, perm[1])
+            if ln is None or rn is None:
+                warn.append("주소창 번호 %d/%d 를 이름표에서 찾지 못함" % perm)
+        if ln is None or rn is None:               # 2) 주소창 실패한 쪽만 이름표 OCR
+            ln = ln or ocr_name_near(pil, boxes['left'], idx)
+            rn = rn or ocr_name_near(pil, boxes['right'], idx)
+
     out = {k: crop_with_pad(pil, boxes[k], pad) for k in ("fused", "left", "right")}
     out.update(left_name=ln, right_name=rn, warn=warn)
     return out
@@ -375,10 +387,29 @@ def _capture_signature():
     return sig
 
 
-@st.cache_data(show_spinner=False, max_entries=2)
-def _process_captures(sig):
-    """captures/ 폴더의 캡처를 자동으로 잘라내고 이름을 읽는다. (결과는 캐시)"""
+@st.cache_data(show_spinner=False, max_entries=2000)
+def _process_one(name, size, mtime, m_l, m_r):
+    """캡처 1장만 처리(파일별 캐시) — 새로 올린 캡처만 계산하므로 빠르다."""
     table, idx = load_names()
+    pair = (m_l, m_r) if (m_l or m_r) else None
+    try:
+        r = process_capture(str(ROOT / name), idx, table, pair)
+    except Exception as e:
+        return {"error": str(e)}
+    if r is None:
+        return None
+    return {
+        "fused": _pil_uri(r["fused"]),
+        "left": _pil_uri(r["left"]),
+        "right": _pil_uri(r["right"]),
+        "left_name": r["left_name"]["ko"] if r["left_name"] else None,
+        "right_name": r["right_name"]["ko"] if r["right_name"] else None,
+        "warn": r.get("warn", []),
+    }
+
+
+def _process_captures(sig):
+    """캡처 목록 → 게임 문제 목록. 파일별 캐시 덕분에 추가분만 계산한다."""
     manual = {}
     if MANUAL_CSV.exists():
         with open(MANUAL_CSV, encoding="utf-8-sig", newline="") as f:
@@ -386,51 +417,47 @@ def _process_captures(sig):
                 if row.get("file"):
                     manual[row["file"].strip()] = ((row.get("left") or "").strip(),
                                                    (row.get("right") or "").strip())
-    names = [x[0] for x in sig if x[0] != "manual_names.csv"]
+    names = [x for x in sig if x[0] != "manual_names.csv"]
     entries, seen, problems = [], set(), []
-    bar = st.progress(0.0, text="캡처 이미지를 정리하는 중… (처음 한 번만)")
-    for i, fname in enumerate(names):
+    bar = st.progress(0.0, text="캡처 정리 중…")
+    for i, (name, size, mtime) in enumerate(names):
         bar.progress((i + 1) / max(1, len(names)), text="캡처 정리 중… %d / %d" % (i + 1, len(names)))
-        try:
-            r = process_capture(str(ROOT / fname), idx, table, manual.get(Path(fname).name))
-        except Exception as e:  # 한 장이 깨져도 게임은 계속
-            problems.append((Path(fname).name, "오류: %s" % e))
-            continue
+        m = manual.get(Path(name).name, ("", ""))
+        r = _process_one(name, size, mtime, m[0], m[1])
         if r is None:
-            problems.append((Path(fname).name, "합성/좌/우 그림을 찾지 못함"))
+            problems.append((Path(name).name, "합성/좌/우 그림을 찾지 못함"))
             continue
-        for _w in r.get("warn", []):
-            problems.append((Path(fname).name, _w))
-        ln, rn = r["left_name"], r["right_name"]
-        if ln and rn:
-            key = (ln["dex"], rn["dex"])
+        if "error" in r:
+            problems.append((Path(name).name, "오류: %s" % r["error"]))
+            continue
+        if r["left_name"] and r["right_name"]:
+            key = (r["left_name"], r["right_name"])
             if key in seen:
-                continue  # 같은 조합 중복은 건너뜀
+                continue
             seen.add(key)
         else:
-            problems.append((Path(fname).name, "이름을 읽지 못함"))
-        entries.append({
-            "id": "%03d" % (len(entries) + 1),
-            "source": fname,
-            "fused": _pil_uri(r["fused"]),
-            "left": _pil_uri(r["left"]),
-            "right": _pil_uri(r["right"]),
-            "left_name": ln["ko"] if ln else "?",
-            "right_name": rn["ko"] if rn else "?",
-        })
+            problems.append((Path(name).name, "이름을 읽지 못함"))
+        for w in r.get("warn", []):
+            problems.append((Path(name).name, w))
+        entries.append({"id": "%03d" % (len(entries) + 1), "source": Path(name).name,
+                        "fused": r["fused"], "left": r["left"], "right": r["right"],
+                        "left_name": r["left_name"] or "?", "right_name": r["right_name"] or "?"})
     bar.empty()
     return {"entries": entries, "problems": problems, "total_files": len(names)}
 
 
 def load_entries():
-    """captures/ 에 이미지가 있으면 그것을, 없으면 manifest.json 을 사용."""
+    """미리 정리된 manifest.json 이 있으면 그것을 바로 쓰고(가장 빠름),
+    없으면 올려둔 캡처를 그때 처리한다."""
+    data = load_manifest()
+    if data.get("precomputed") and data.get("entries"):
+        return {"entries": data["entries"], "problems": [], "total_files": 0, "mode": "precomputed"}
     sig = _capture_signature()
     if [x for x in sig if x[0] != "manual_names.csv"]:
         return _process_captures(sig)
-    data = load_manifest()
     ents = [e for e in (data.get("entries", []) or [])
             if str(e.get("fused", "")).startswith(("http", "data:")) or (ROOT / str(e.get("fused", ""))).exists()]
-    return {"entries": ents, "problems": [], "total_files": 0}
+    return {"entries": ents, "problems": [], "total_files": 0, "mode": "manifest"}
 
 
 @st.cache_data(show_spinner=False)
