@@ -38,6 +38,9 @@ BGM_PATH = ROOT / "bgm.mp3" if (ROOT / "bgm.mp3").exists() else ROOT / "assets" 
 
 
 
+
+
+
 # =====================================================================
 #  캡처 자동 처리 (이 파일 안에 모두 포함 — 다른 폴더가 없어도 동작)
 # =====================================================================
@@ -59,10 +62,13 @@ def load_names():
     return table, idx
 
 
-"""퓨전 캡처 자동 처리 코어 (폰 캡처 구조 대응 / 속도 개선판)
+"""퓨전 캡처 자동 처리 코어 (폰 캡처 구조 대응)
 
-캡처 위치가 항상 같다는 점을 이용해 '정해진 구역'만 보고 잘라낸다.
-이름은 주소창의 도련번호(...net/43/93)를 OCR 1회로 읽는다.
+원칙
+ 1) 포켓몬 그림은 '배경과 다른 덩어리' 로 통째로 잡는다 → 잘리지 않는다.
+ 2) 회색·흰색 포켓몬도 포함한다(색 필터로 거르지 않는다).
+ 3) 글자·입력상자·배너 등 UI 는 모양/면적 기준으로 걸러낸다.
+ 4) 이름은 주소창의 도감번호(...net/43/93) OCR 1회를 우선 사용한다.
 """
 import re
 from difflib import SequenceMatcher
@@ -78,13 +84,13 @@ except Exception:
 
 IMG_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
 
-# 캡처 안에서 포켓몬이 항상 있는 구역 (가로/세로 비율) — 여기만 검사
+# 예비용: 구역 기반 검출을 쓸 때의 대략적 위치 (가로/세로 비율)
 LAYOUT = {
-    "fused": (0.18, 0.24, 0.82, 0.53),
-    "left":  (0.04, 0.52, 0.50, 0.73),
-    "right": (0.50, 0.52, 0.96, 0.73),
+    "fused": (0.10, 0.20, 0.92, 0.55),
+    "left":  (0.02, 0.50, 0.50, 0.80),
+    "right": (0.50, 0.50, 0.98, 0.80),
 }
-PERMALINK_BAND = (0.0, 0.84, 1.0, 1.0)
+PERMALINK_BAND = (0.0, 0.82, 1.0, 1.0)
 
 
 def norm(s):
@@ -93,7 +99,7 @@ def norm(s):
 
 
 def match_name(text, idx, threshold=0.78):
-    """OCR 문자열에서 1세대 포켓몬 이름 찾기 (영어 이름만 사용)"""
+    """OCR 문자열에서 1세대 포켓몬 이름 찾기 (영어 이름 사용)"""
     if not text:
         return None
     en = {k: v for k, v in idx.items() if k.isascii() and len(k) >= 3}
@@ -146,13 +152,116 @@ def _bg_color(rgb):
     return border[keys == vals[np.argmax(counts)]].mean(axis=0)
 
 
-def _mask(rgb):
-    """배경도 아니고 색이 있는 픽셀 = 포켓몬 그림 후보"""
+def _sprite_mask(rgb, loose=False):
+    """포켓몬 그림 후보만 남긴 마스크 (회색·흰색 포함, 글자/상자/배너 제외)"""
+    H, W, _ = rgb.shape
     bg = _bg_color(rgb)
-    diff = (np.abs(rgb.astype(np.int16) - bg[None, None, :].astype(np.int16)).max(axis=2) > 30)
-    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
-    colorful = (hsv[:, :, 1] > 55) & (hsv[:, :, 2] > 60)
-    return (diff & colorful).astype(np.uint8) * 255
+    raw = (np.abs(rgb.astype(np.int16) - bg[None, None, :].astype(np.int16)).max(axis=2) > 32)
+    raw = (raw.astype(np.uint8)) * 255
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(raw, 8)
+    keep = np.zeros_like(raw)
+    for i in range(1, n):
+        x, y, w, h, a = [int(v) for v in stats[i]]
+        if w > 0.85 * W and h < 0.22 * H:              # 상단 배너
+            continue
+        if y + h / 2.0 < 0.045 * H or y > 0.93 * H:     # 상태바 / 하단바
+            continue
+        if a < 0.0012 * W * H:                          # 글자·작은 아이콘
+            continue
+        if a / max(1.0, w * h) < 0.22:                  # 속이 빈 상자(테두리만)
+            continue
+        if w < 0.025 * W or h < 0.015 * H:
+            continue
+        keep[lab == i] = 255
+    k = max(3, int(round(0.020 * W)) | 1)
+    return cv2.dilate(keep, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)), iterations=1)
+
+
+def _components(pil, mask, allow_split=True):
+    """마스크에서 그림 덩어리 목록을 뽑는다."""
+    H, W = mask.shape
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    comps = []
+    for i in range(1, n):
+        x, y, w, h, a = [int(v) for v in stats[i]]
+        if w > 0.85 * W and h < 0.22 * H:
+            continue
+        if y + h / 2.0 < 0.045 * H or y > 0.93 * H:
+            continue
+        if a < 0.0008 * W * H or w < 0.02 * W or h < 0.015 * H:
+            continue
+        if not (0.20 <= w / max(1.0, h) <= 3.5):
+            continue
+        comps.append({'x': x, 'y': y, 'w': w, 'h': h, 'area': a,
+                      'cx': x + w / 2.0, 'cy': y + h / 2.0})
+    comps.sort(key=lambda b: -b['area'])
+    return comps
+
+
+def find_blobs_components(pil, mask):
+    """가장 큰 그림 = 합성, 그 아래 좌/우 = 합성1 / 합성2 (그림을 자르지 않음)"""
+    comps = _components(pil, mask)
+    if not comps:
+        return None
+    W, H = pil.size
+    fused = comps[0]
+    if fused['cy'] > 0.62 * H:
+        fused = next((c for c in comps if c['cy'] < 0.62 * H), fused)
+    low = [c for c in comps if c is not fused and c['y'] > fused['y'] + fused['h'] - 0.06 * H]
+    lefts = [c for c in low if c['cx'] < 0.5 * W]
+    rights = [c for c in low if c['cx'] >= 0.5 * W]
+    if not (lefts and rights):
+        return None
+    return {'fused': fused, 'left': max(lefts, key=lambda b: b['area']),
+            'right': max(rights, key=lambda b: b['area'])}
+
+
+
+def find_blobs_three(pil, mask):
+    """3차: 큰 그림 3개를 골라 위=합성, 아래 좌/우 로 배정 (화면이 스크롤돼 위치가 달라도 대응)"""
+    comps = _components(pil, mask)
+    if len(comps) < 3:
+        return None
+    top = comps[:4]
+    top.sort(key=lambda c: c['cy'])
+    fused = top[0]
+    if fused['area'] < 0.5 * top[1]['area']:
+        fused = max(top, key=lambda c: c['area'])
+    rest = sorted([c for c in top if c is not fused], key=lambda c: c['cx'])[:2]
+    if len(rest) < 2:
+        return None
+    return {'fused': fused, 'left': rest[0], 'right': rest[1]}
+
+
+
+def find_blobs_symmetric(pil, mask):
+    """4차: 한쪽만 잡히면(흰색 포켓몬 등) 반대쪽은 사이트 좌우 대칭을 이용해 잡는다."""
+    comps = _components(pil, mask)
+    if not comps:
+        return None
+    W, H = pil.size
+    fused = comps[0]
+    low = [c for c in comps if c is not fused and c['y'] > fused['y'] + fused['h'] - 0.06 * H]
+    if not low:
+        return None
+    c = max(low, key=lambda b: b['area'])
+    mirror = {'x': int(W - (c['x'] + c['w'])), 'y': c['y'], 'w': c['w'], 'h': c['h']}
+    if c['cx'] < 0.5 * W:
+        left, right = dict(c), mirror
+    else:
+        left, right = mirror, dict(c)
+    for b in (left, right):                     # 대칭이 조금 어긋날 수 있으니 여유를 준다
+        gx, gy = int(b['w'] * 0.10), int(b['h'] * 0.10)
+        b['x'] = max(0, b['x'] - gx)
+        b['y'] = max(0, b['y'] - gy)
+        b['w'] = min(W - b['x'], b['w'] + 2 * gx)
+        b['h'] = min(H - b['y'], b['h'] + 2 * gy)
+    return {'fused': fused, 'left': left, 'right': right}
+
+
+def _win(pil, frac):
+    W, H = pil.size
+    return (int(frac[0] * W), int(frac[1] * H), int(frac[2] * W), int(frac[3] * H))
 
 
 def _best_blob(mask, win):
@@ -163,13 +272,13 @@ def _best_blob(mask, win):
     k = max(3, int(round(min(sub.shape[:2]) / 40)) | 1)
     sub = cv2.morphologyEx(sub, cv2.MORPH_CLOSE,
                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)), iterations=2)
-    n, lab, stats, cent = cv2.connectedComponentsWithStats(sub, 8)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(sub, 8)
     best = None
     for i in range(1, n):
         x, y, w, h, a = [int(v) for v in stats[i]]
         if a < 0.0015 * sub.size or w < 6 or h < 6:
             continue
-        if w > 0.92 * (x1 - x0) and h < 0.15 * (y1 - y0):   # 가로로 긴 선/테두리
+        if w > 0.92 * (x1 - x0) and h < 0.15 * (y1 - y0):
             continue
         if h > 0.92 * (y1 - y0) and w < 0.15 * (x1 - x0):
             continue
@@ -178,21 +287,55 @@ def _best_blob(mask, win):
     return best
 
 
-def _win(pil, frac):
+def _detect_by_window(pil, key, mask):
+    """예비: 정해진 구역에서 찾되 경계에 닿으면 넓혀서 다시 찾는다."""
     W, H = pil.size
-    return (int(frac[0] * W), int(frac[1] * H), int(frac[2] * W), int(frac[3] * H))
+    win = _win(pil, LAYOUT[key])
+    for _ in range(5):
+        b = _best_blob(mask, win)
+        if b is None:
+            return None
+        x0, y0, x1, y1 = win
+        g = [b['x'] <= x0 + 2, b['y'] <= y0 + 2,
+             b['x'] + b['w'] >= x1 - 2, b['y'] + b['h'] >= y1 - 2]
+        if key == 'left':
+            g[2] = False
+        if key == 'right':
+            g[0] = False
+        if not any(g):
+            return b
+        nx0 = max(0, int(x0 - 0.10 * W)) if g[0] else x0
+        ny0 = max(0, int(y0 - 0.10 * H)) if g[1] else y0
+        nx1 = min(W, int(x1 + 0.10 * W)) if g[2] else x1
+        ny1 = min(H, int(y1 + 0.06 * H)) if g[3] else y1
+        if (nx0, ny0, nx1, ny1) == (x0, y0, x1, y1):
+            return b
+        win = (nx0, ny0, nx1, ny1)
+    return _best_blob(mask, win)
 
 
 def find_blobs(path, debug_dir=None):
-    """캡처 → {fused,left,right} 영역. 정해진 구역만 검사하므로 빠르다."""
+    """캡처 → {fused,left,right} 영역"""
     pil = Image.open(path).convert('RGB')
     rgb = np.asarray(pil)
-    mask = _mask(rgb)
-    boxes = {}
-    for key in ("fused", "left", "right"):
-        b = _best_blob(mask, _win(pil, LAYOUT[key]))
-        if b:
-            boxes[key] = b
+    mask = _sprite_mask(rgb)
+    boxes = find_blobs_components(pil, mask)
+    if boxes is None:
+        mask2 = _sprite_mask(rgb, loose=True)
+        boxes = (find_blobs_components(pil, mask2) or find_blobs_three(pil, mask2)
+                 or find_blobs_symmetric(pil, mask2))
+        if boxes:
+            mask = mask2
+    if boxes is None:
+        boxes = find_blobs_symmetric(pil, mask) or {}
+    if not boxes:
+        boxes = {}
+        for key in ("fused", "left", "right"):
+            b = _detect_by_window(pil, key, mask)
+            if b:
+                boxes[key] = b
+        if len(boxes) != 3:
+            return pil, None, None
     if debug_dir:
         import os
         os.makedirs(debug_dir, exist_ok=True)
@@ -200,47 +343,13 @@ def find_blobs(path, debug_dir=None):
         for k, b in boxes.items():
             cv2.rectangle(viz, (b['x'], b['y']), (b['x'] + b['w'], b['y'] + b['h']), (255, 0, 0), 2)
         Image.fromarray(viz).save(os.path.join(debug_dir, 'debug_' + os.path.basename(path)))
-    return pil, (boxes if len(boxes) == 3 else None), None
+    return pil, boxes, mask
 
 
-def find_blobs_auto(path):
-    """예비: 정해진 구역에서 못 찾았을 때 전체에서 찾는다(느리지만 구조가 다른 캡처 대응)."""
-    pil = Image.open(path).convert('RGB')
-    rgb = np.asarray(pil)
-    H, W, _ = rgb.shape
-    mask = _mask(rgb)
-    k = max(3, int(round(min(H, W) / 90)) | 1)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
-                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)), iterations=2)
-    n, lab, stats, cent = cv2.connectedComponentsWithStats(mask, 8)
-    blobs = []
-    for i in range(1, n):
-        x, y, w, h, a = [int(v) for v in stats[i]]
-        if y + h / 2.0 < 0.045 * H or y > 0.93 * H:
-            continue
-        if w > 0.85 * W and h < 0.22 * H:
-            continue
-        if a < 0.00035 * W * H or w < 0.015 * W or h < 0.012 * H:
-            continue
-        if not (0.25 <= w / max(1.0, h) <= 3.2):
-            continue
-        blobs.append({'x': x, 'y': y, 'w': w, 'h': h, 'area': a})
-    if not blobs:
-        return pil, None
-    blobs.sort(key=lambda b: -b['area'])
-    fused = next((b for b in blobs if (b['y'] + b['h'] / 2.0) < 0.62 * H), blobs[0])
-    low = [b for b in blobs if b is not fused and b['y'] > fused['y'] + fused['h'] - 0.02 * H]
-    lefts = [b for b in low if b['x'] + b['w'] / 2.0 < 0.5 * W]
-    rights = [b for b in low if b['x'] + b['w'] / 2.0 >= 0.5 * W]
-    if lefts and rights:
-        return pil, {'fused': fused, 'left': max(lefts, key=lambda b: b['area']),
-                     'right': max(rights, key=lambda b: b['area'])}
-    return pil, None
-
-
-def crop_with_pad(pil, box, pad):
+def crop_with_pad(pil, box, pad=0.07, min_pad=6):
     W, H = pil.size
-    px, py = int(box['w'] * pad) + 3, int(box['h'] * pad) + 3
+    px = max(min_pad, int(box['w'] * pad))
+    py = max(min_pad, int(box['h'] * pad))
     return pil.crop((max(0, box['x'] - px), max(0, box['y'] - py),
                      min(W, box['x'] + box['w'] + px), min(H, box['y'] + box['h'] + py)))
 
@@ -263,7 +372,7 @@ def _ocr(pil, box, psm=6, upscale=None):
 
 
 def ocr_permalink_dex(pil):
-    """주소창 'Permalink: ...net/43/93' → (왼쪽 도감번호, 오른쪽 도감번호). OCR 1회."""
+    """주소창 'Permalink: ...net/43/93' → (왼쪽 도감번호, 오른쪽 도감번호)"""
     W, H = pil.size
     box = (int(PERMALINK_BAND[0] * W), int(PERMALINK_BAND[1] * H),
            int(PERMALINK_BAND[2] * W), int(PERMALINK_BAND[3] * H))
@@ -278,7 +387,7 @@ def ocr_permalink_dex(pil):
 
 
 def ocr_name_near(pil, box, idx):
-    """포켓몬 그림 위(이름 상자) 글자 읽기 — 2구역만 시도"""
+    """포켓몬 그림 위(이름 상자) 글자 읽기"""
     W, H = pil.size
     x, y, w, h = box['x'], box['y'], box['w'], box['h']
     for fh, fw in ((1.6, 0.8), (2.2, 1.2)):
@@ -294,8 +403,6 @@ def ocr_name_near(pil, box, idx):
 def process_capture(path, idx, table, manual_pair=None, pad=0.07, debug_dir=None):
     """캡처 1장 → 잘라낸 3그림 + 한글 이름. 실패하면 None."""
     pil, boxes, _ = find_blobs(path, debug_dir=debug_dir)
-    if boxes is None:                     # 폰 캡처가 아니면 예비 검출로 한 번 더
-        pil, boxes = find_blobs_auto(path)
     if boxes is None:
         return None
     warn = []
@@ -306,13 +413,13 @@ def process_capture(path, idx, table, manual_pair=None, pad=0.07, debug_dir=None
         rn = (idx.get(norm(r)) or lookup_ko(r, table)) if r else None
 
     if pytesseract is not None and (ln is None or rn is None):
-        perm = ocr_permalink_dex(pil)              # 1) 주소창 도감번호 (빠름)
+        perm = ocr_permalink_dex(pil)          # 1) 주소창 도감번호 (빠름)
         if perm:
             ln = ln or by_dex(table, perm[0])
             rn = rn or by_dex(table, perm[1])
             if ln is None or rn is None:
                 warn.append("주소창 번호 %d/%d 를 이름표에서 찾지 못함" % perm)
-        if ln is None or rn is None:               # 2) 주소창 실패한 쪽만 이름표 OCR
+        if ln is None or rn is None:           # 2) 실패한 쪽만 이름표 OCR
             ln = ln or ocr_name_near(pil, boxes['left'], idx)
             rn = rn or ocr_name_near(pil, boxes['right'], idx)
 
